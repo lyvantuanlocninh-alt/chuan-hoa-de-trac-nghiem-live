@@ -1,0 +1,5 @@
+{
+  "name": "Công cụ tạo và chuẩn hóa đề LIVE",
+  "description": "Tạo nguồn đề trắc nghiệm chuyên nghiệp cho Google Sheets từ yêu cầu hoặc tệp tin (PDF, Word, Ảnh). Hỗ trợ công thức Toán học TeX và nhiều định dạng câu hỏi.",
+  "requestFramePermissions": []
+}
