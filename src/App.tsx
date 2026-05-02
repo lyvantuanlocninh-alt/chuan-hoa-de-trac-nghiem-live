@@ -1,25 +1,28 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   FileText, 
   Upload, 
   Send, 
-  Copy, 
-  Download, 
-  Check, 
+  Copy,
+  Download,
+  Check,
   AlertCircle, 
   Loader2, 
   Trash2,
   Table as TableIcon,
-  ChevronRight,
-  Info
+  Info,
+  FileText as FileDoc,
+  Image as ImageIcon
 } from 'lucide-react';
+import JSZip from 'jszip';
 import ReactMarkdown from 'react-markdown';
 import rehypeRaw from 'rehype-raw';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
-import * as XLSX from 'xlsx';
+import { saveAs } from 'file-saver';
+import { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType } from 'docx';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { generateQuiz } from './lib/gemini';
@@ -33,10 +36,15 @@ type GenerationMode = 'prompt' | 'file';
 export default function App() {
   const [mode, setMode] = useState<GenerationMode>('prompt');
   const [prompt, setPrompt] = useState('');
+  const [mcqCount, setMcqCount] = useState<string>('5');
+  const [tfCount, setTfCount] = useState<string>('0');
+  const [shortCount, setShortCount] = useState<string>('0');
+  const [essayCount, setEssayCount] = useState<string>('0');
   const [file, setFile] = useState<File | null>(null);
   const [fileBase64, setFileBase64] = useState<string | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [result, setResult] = useState<string | null>(null);
+  const [adjustmentNotes, setAdjustmentNotes] = useState<string | null>(null);
   const [copySuccess, setCopySuccess] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -70,8 +78,31 @@ export default function App() {
 
     try {
       const fileData = file && fileBase64 ? { data: fileBase64, mimeType: file.type } : undefined;
-      const response = await generateQuiz(prompt || 'Hãy tạo đề trắc nghiệm từ tệp tin này.', fileData);
-      setResult(response || '');
+      
+      let finalPrompt = '';
+      if (mode === 'prompt') {
+        finalPrompt = `YÊU CẦU CẤU TRÚC ĐỀ:
+- Số câu trắc nghiệm (MCQ): ${mcqCount}
+- Số câu Đúng/Sai (TRUE_FALSE): ${tfCount}
+- Số câu trả lời ngắn (SHORT): ${shortCount}
+- Số câu tự luận (ESSAY): ${essayCount}
+
+NỘI DUNG YÊU CẦU CHI TIẾT:
+${prompt}`;
+      } else {
+        finalPrompt = prompt || 'Hãy tạo đề trắc nghiệm từ tệp tin này.';
+      }
+
+      const response = await generateQuiz(finalPrompt, fileData);
+      
+      if (response && response.includes('[ADJUSTMENT_NOTES]')) {
+        const parts = response.split('[ADJUSTMENT_NOTES]');
+        setResult(parts[0].trim());
+        setAdjustmentNotes(parts[1].trim());
+      } else {
+        setResult(response || '');
+        setAdjustmentNotes(null);
+      }
     } catch (err: any) {
       console.error(err);
       setError('Đã xảy ra lỗi khi tạo đề. Vui lòng thử lại.');
@@ -100,7 +131,13 @@ export default function App() {
       'Lời giải chi tiết',
       'Link ảnh',
       'Giới hạn thời gian',
-      'Thang điểm'
+      'Thang điểm',
+      'Link ảnh lời giải',
+      'Mức độ',
+      'Chương/chủ đề',
+      'Tên bài học',
+      'Dạng toán',
+      'Lớp'
     ];
 
     const data = tableLines.slice(2).map(line => {
@@ -114,91 +151,42 @@ export default function App() {
       // Split by pipe
       const rawCells = cleanLine.split('|').map(c => c.trim());
       
-      const processedCells = Array(12).fill('');
+      const processedCells = Array(18).fill('');
       
-      if (rawCells.length === 12) {
+      if (rawCells.length === 18) {
         rawCells.forEach((cell, i) => processedCells[i] = cell);
-      } else if (rawCells.length > 12) {
-        // If there are more than 12 cells, it means some cells contained a '|' character.
-        // We assume the extra pipes are in 'content' (index 1) or 'explanation' (index 8).
-        // Strategy: 
-        // 1. Take the first 1 column (id)
-        processedCells[0] = rawCells[0];
+      } else if (rawCells.length > 18) {
+        // Heuristic mapping: first 8 are columns 0-7, then last 9 from end, middle is explanation (8).
+        for(let i=0; i<8; i++) processedCells[i] = rawCells[i] || '';
         
-        // 2. Take the last 3 columns (image, timeLimit, scoreScale)
-        processedCells[11] = rawCells[rawCells.length - 1];
-        processedCells[10] = rawCells[rawCells.length - 2];
-        processedCells[9] = rawCells[rawCells.length - 3];
+        processedCells[17] = rawCells[rawCells.length - 1] || '';
+        processedCells[16] = rawCells[rawCells.length - 2] || '';
+        processedCells[15] = rawCells[rawCells.length - 3] || '';
+        processedCells[14] = rawCells[rawCells.length - 4] || '';
+        processedCells[13] = rawCells[rawCells.length - 5] || '';
+        processedCells[12] = rawCells[rawCells.length - 6] || '';
+        processedCells[11] = rawCells[rawCells.length - 7] || '';
+        processedCells[10] = rawCells[rawCells.length - 8] || '';
+        processedCells[9] = rawCells[rawCells.length - 9] || '';
         
-        // 3. Take the columns between id and explanation (content, optionA-D, answer, type)
-        // These are 7 columns. But 'content' might have pipes.
-        // Let's assume optionA-D, answer, type are usually simple and don't have pipes.
-        // They are at the end of the "middle" section.
-        processedCells[7] = rawCells[rawCells.length - 4]; // type
-        processedCells[6] = rawCells[rawCells.length - 5]; // answer
-        processedCells[5] = rawCells[rawCells.length - 6]; // optionD
-        processedCells[4] = rawCells[rawCells.length - 7]; // optionC
-        processedCells[3] = rawCells[rawCells.length - 8]; // optionB
-        processedCells[2] = rawCells[rawCells.length - 9]; // optionA
-        
-        // 4. Everything between index 1 and the cell before optionA is 'content'
-        const contentEndIndex = rawCells.length - 10;
-        processedCells[1] = rawCells.slice(1, contentEndIndex + 1).join(' | ');
-        
-        // 5. Wait, we missed 'explanation' (index 8). Let's re-adjust.
-        // Correct indices for 12 columns: 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11
-        // Let's try again with a more reliable mapping:
-        // First 1: id (index 0)
-        // Last 3: image (9), timeLimit (10), scoreScale (11)
-        // We have 8 columns left to fill (1 to 8).
-        // Let's assume columns 2, 3, 4, 5, 6, 7 are "stable" (options, answer, type)
-        // and pipes are in 1 (content) or 8 (explanation).
-        
-        // Re-parsing logic:
-        processedCells[0] = rawCells[0]; // id
-        processedCells[11] = rawCells[rawCells.length - 1]; // scoreScale
-        processedCells[10] = rawCells[rawCells.length - 2]; // timeLimit
-        processedCells[9] = rawCells[rawCells.length - 3]; // image
-        processedCells[7] = rawCells[rawCells.length - 4]; // type
-        processedCells[6] = rawCells[rawCells.length - 5]; // answer
-        processedCells[5] = rawCells[rawCells.length - 6]; // optionD
-        processedCells[4] = rawCells[rawCells.length - 7]; // optionC
-        processedCells[3] = rawCells[rawCells.length - 8]; // optionB
-        processedCells[2] = rawCells[rawCells.length - 9]; // optionA
-        
-        // Now we have index 1 and 8 left. And rawCells from index 1 to rawCells.length - 10.
-        // This is still ambiguous if both have pipes. 
-        // But usually 'explanation' is the one with the most text.
-        // Let's assume index 1 is just one cell and join the rest into 8.
-        processedCells[1] = rawCells[1];
-        processedCells[8] = rawCells.slice(8, rawCells.length - 3).join(' | ');
-        
-        // Actually, let's just do a simple join for index 8 if length > 12 and we can't be sure.
-        // The most common case is pipe in explanation.
-        if (rawCells.length > 12) {
-           // Reset and use a simpler heuristic: first 8 are 0-7, last 3 are last 3, middle is 8.
-           for(let i=0; i<8; i++) processedCells[i] = rawCells[i];
-           processedCells[11] = rawCells[rawCells.length - 1];
-           processedCells[10] = rawCells[rawCells.length - 2];
-           processedCells[9] = rawCells[rawCells.length - 3];
-           processedCells[8] = rawCells.slice(8, rawCells.length - 3).join(' | ');
-        }
+        processedCells[8] = rawCells.slice(8, rawCells.length - 9).join(' | ');
       } else {
-        rawCells.forEach((cell, i) => { if (i < 12) processedCells[i] = cell; });
+        rawCells.forEach((cell, i) => { if (i < 18) processedCells[i] = cell; });
       }
 
       // Final sanitization for TSV
       const rowData = processedCells.map((cell, index) => {
-        // Remove tabs
         let sanitized = cell.replace(/\t/g, ' ');
-        
-        // Keep <br> as literal text, but remove any actual newlines that might have leaked
-        // to ensure each question is strictly on one line.
         sanitized = sanitized.replace(/\r?\n/g, ' ');
         
-        // If it's the answer column (index 6) and contains ';', replace with '|'
-        if (index === 6 && sanitized.includes(';')) {
-          return sanitized.replace(/;/g, '|');
+        // If it's the answer column (index 6) and contains any separators common for TF, normalize to |
+        if (index === 6 && (sanitized.includes(';') || sanitized.includes(',') || (sanitized.length >= 4 && !sanitized.includes('|')))) {
+          // Attempt to normalize ĐS... or Đ;S... to Đ|S|...
+          const tokens = sanitized.split(/[;,]/).map(t => t.trim().toUpperCase()).filter(Boolean);
+          if (tokens.length === 4) return tokens.join('|');
+          // If no separators but exactly 4 Đ/S chars like ĐSĐS
+          const charTokens = sanitized.replace(/\s+/g, '').match(/[ĐS]/gi);
+          if (charTokens && charTokens.length === 4) return charTokens.map(c => c.toUpperCase()).join('|');
         }
         return sanitized;
       });
@@ -211,100 +199,259 @@ export default function App() {
     setTimeout(() => setCopySuccess(false), 2000);
   };
 
-  const handleExportExcel = () => {
-    if (!result) return;
-
+  const parseTableData = () => {
+    if (!result) return [];
+    
     const lines = result.trim().split('\n');
-    // Find the line that starts with | and contains headers
     const tableLines = lines.filter(line => line.trim().startsWith('|'));
     
-    if (tableLines.length < 3) return;
+    if (tableLines.length < 3) return [];
 
-    // The headers are in the first row of the table
-    const rawHeaders = tableLines[0].split('|').map(h => h.trim()).filter(h => h !== '');
-    
-    // We want to use the exact headers from the user's template
-    const finalHeaders = [
-      'Mã câu hỏi',
-      'Nội dung câu hỏi',
-      'Phương án A / Ý a',
-      'Phương án B / Ý b',
-      'Phương án C / Ý c',
-      'Phương án D / Ý d',
-      'Đáp án đúng',
-      'Loại câu hỏi',
-      'Lời giải chi tiết',
-      'Link ảnh',
-      'Giới hạn thời gian',
-      'Thang điểm'
-    ];
-
-    const data = tableLines.slice(2).map(line => {
-      const trimmedLine = line.trim();
-      
-      // Remove leading and trailing pipes
-      let cleanLine = trimmedLine;
+    return tableLines.slice(2).map(line => {
+      let cleanLine = line.trim();
       if (cleanLine.startsWith('|')) cleanLine = cleanLine.substring(1);
       if (cleanLine.endsWith('|')) cleanLine = cleanLine.substring(0, cleanLine.length - 1);
       
-      // Split by pipe
       const rawCells = cleanLine.split('|').map(c => c.trim());
+      const processedCells = Array(18).fill('');
       
-      const processedCells = Array(12).fill('');
-      
-      if (rawCells.length === 12) {
+      if (rawCells.length === 18) {
         rawCells.forEach((cell, i) => processedCells[i] = cell);
-      } else if (rawCells.length > 12) {
-        // Smart join for explanation column (index 8)
+      } else if (rawCells.length > 18) {
         for(let i=0; i<8; i++) processedCells[i] = rawCells[i] || '';
-        processedCells[11] = rawCells[rawCells.length - 1] || '';
-        processedCells[10] = rawCells[rawCells.length - 2] || '';
-        processedCells[9] = rawCells[rawCells.length - 3] || '';
-        processedCells[8] = rawCells.slice(8, rawCells.length - 3).join(' | ');
+        processedCells[17] = rawCells[rawCells.length - 1] || '';
+        processedCells[16] = rawCells[rawCells.length - 2] || '';
+        processedCells[15] = rawCells[rawCells.length - 3] || '';
+        processedCells[14] = rawCells[rawCells.length - 4] || '';
+        processedCells[13] = rawCells[rawCells.length - 5] || '';
+        processedCells[12] = rawCells[rawCells.length - 6] || '';
+        processedCells[11] = rawCells[rawCells.length - 7] || '';
+        processedCells[10] = rawCells[rawCells.length - 8] || '';
+        processedCells[9] = rawCells[rawCells.length - 9] || '';
+        processedCells[8] = rawCells.slice(8, rawCells.length - 9).join(' | ');
       } else {
-        rawCells.forEach((cell, i) => { if (i < 12) processedCells[i] = cell; });
+        rawCells.forEach((cell, i) => { if (i < 18) processedCells[i] = cell; });
       }
 
-      const row: any = {};
-      finalHeaders.forEach((header, index) => {
-        let value = processedCells[index] || '';
-        // Sanitize: remove tabs
-        value = value.replace(/\t/g, ' ');
-        
-        // Keep <br> as literal text, but remove any actual newlines that might have leaked
-        value = value.replace(/\r?\n/g, ' ');
-        
-        // If it's the answer column (index 6) and contains ';', replace with '|'
-        if (index === 6 && value.includes(';')) {
-          value = value.replace(/;/g, '|');
-        }
-        row[header] = value;
-      });
-      return row;
+      return {
+        id: processedCells[0],
+        content: processedCells[1],
+        optionA: processedCells[2],
+        optionB: processedCells[3],
+        optionC: processedCells[4],
+        optionD: processedCells[5],
+        answer: processedCells[6],
+        type: processedCells[7],
+        explanation: processedCells[8],
+        image: processedCells[9],
+        timeLimit: processedCells[10],
+        scoreScale: processedCells[11],
+        explanationImage: processedCells[12],
+        level: processedCells[13],
+        topic: processedCells[14],
+        lessonName: processedCells[15],
+        questionType2: processedCells[16],
+        gradeLevel: processedCells[17]
+      };
+    });
+  };
+
+  const handleExportWordLatex = async () => {
+    const questions = parseTableData();
+    if (questions.length === 0) return;
+
+    const latexHeader = [
+      "\\documentclass[12pt,a4paper]{article}",
+      "\\usepackage[utf8]{vietnam}",
+      "\\usepackage{amsmath,amssymb,amsfonts,amsthm}",
+      "\\usepackage{geometry}",
+      "\\usepackage{multicol}",
+      "\\usepackage{enumerate}",
+      "\\geometry{a4paper,left=1.5cm,right=1.5cm,top=2cm,bottom=2cm}",
+      "",
+      "% --- Khai báo môi trường câu hỏi (Tương thích GrindEQ/Oval) ---",
+      "\\newenvironment{ex}{\\par\\medskip\\noindent}{\\medskip}",
+      "\\newcommand{\\shortchoice}[4]{\\par\\noindent A. #1 \\hfill B. #2 \\hfill C. #3 \\hfill D. #4}",
+      "\\newcommand{\\choiceTF}[4]{\\par\\noindent a) #1 \\hfill b) #2 \\hfill c) #3 \\hfill d) #4}",
+      "% ------------------------------------------------",
+      "",
+      "\\begin{document}",
+      "\\begin{center}",
+      "    \\textbf{\\Large ĐỀ KIỂM TRA TRẮC NGHIỆM}",
+      "\\end{center}",
+      ""
+    ];
+
+    const questionSections = questions.map((q) => {
+      // Helper to replace safe-latex back to standard for Word export
+      // Uses \\\\ \n to ensure line breaks are respected in LaTeX
+      const toStdLatex = (str: string) => str.replace(/<br>/g, ' \\\\ \n').replace(/\\vert/g, '|');
+
+      const qLines: string[] = [];
+      qLines.push(`% --- Câu ${q.id} ---`);
+      // Hardcoding "Câu X." as text to ensure GrindEQ doesn't lose the number
+      qLines.push(`\\begin{ex}\\textbf{Câu ${q.id}.} `);
+      qLines.push(toStdLatex(q.content));
+      
+      if (q.type === 'MCQ') {
+        const choices = `{${q.optionA}}{${q.optionB}}{${q.optionC}}{${q.optionD}}`.replace(/<br>/g, ' ');
+        qLines.push(`\\shortchoice${toStdLatex(choices)}`);
+      } else if (q.type === 'TRUE_FALSE') {
+        const choices = `{${q.optionA}}{${q.optionB}}{${q.optionC}}{${q.optionD}}`.replace(/<br>/g, ' ');
+        qLines.push(`\\choiceTF${toStdLatex(choices)}`);
+      }
+
+      // Flattening \loigiai for GrindEQ compatibility
+      qLines.push(`\\par\\noindent\\textbf{Lời giải.} \\\\`);
+      qLines.push(`Đáp án: ${q.answer}. \\\\`);
+      qLines.push(toStdLatex(q.explanation));
+      
+      qLines.push(`\\end{ex}`);
+      qLines.push("");
+      return qLines;
+    }).flat();
+
+    const latexFooter = ["\\end{document}"];
+
+    const allLines = [...latexHeader, ...questionSections, ...latexFooter];
+
+    const doc = new Document({
+      sections: [{
+        properties: {},
+        children: allLines.map(line => 
+          new Paragraph({
+            children: [
+              new TextRun({ 
+                text: line, 
+                font: "Courier New", 
+                size: 22,
+                color: line.startsWith("\\") ? "2563EB" : "000000"
+              })
+            ],
+            spacing: { after: 0 }
+          })
+        )
+      }],
     });
 
-    const worksheet = XLSX.utils.json_to_sheet(data, { header: finalHeaders, skipHeader: true });
-    
-    // Set column widths for better visibility
-    const wscols = [
-      { wch: 12 }, // Mã
-      { wch: 50 }, // Nội dung
-      { wch: 20 }, // A
-      { wch: 20 }, // B
-      { wch: 20 }, // C
-      { wch: 20 }, // D
-      { wch: 10 }, // Đáp án
-      { wch: 12 }, // Loại
-      { wch: 40 }, // Lời giải
-      { wch: 20 }, // Link ảnh
-      { wch: 15 }, // Thời gian
-      { wch: 15 }  // Thang điểm
-    ];
-    worksheet['!cols'] = wscols;
+    const blob = await Packer.toBlob(doc);
+    saveAs(blob, "De_Thi_LaTeX_Full.docx");
+  };
 
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, 'QuizSheet');
-    XLSX.writeFile(workbook, 'quiz_bank_export.xlsx');
+  const handleExportWord = async () => {
+    const questions = parseTableData();
+    if (questions.length === 0) return;
+
+    const docChildren: any[] = [];
+
+    // Title
+    docChildren.push(
+      new Paragraph({
+        children: [new TextRun({ text: "ĐỀ KIỂM TRA TRẮC NGHIỆM", bold: true, size: 28 })],
+        alignment: AlignmentType.CENTER,
+        spacing: { after: 400 },
+      })
+    );
+
+    questions.forEach((q) => {
+      // Question text
+      docChildren.push(
+        new Paragraph({
+          children: [
+            new TextRun({ text: `Câu ${q.id}. `, bold: true }),
+            new TextRun({ text: q.content.replace(/<br>/g, '\n') }),
+          ],
+          spacing: { before: 200 },
+        })
+      );
+
+      // Options
+      if (q.type === 'MCQ' || q.type === 'TRUE_FALSE') {
+        const optionPrefix = q.type === 'MCQ' ? ['A. ', 'B. ', 'C. ', 'D. '] : ['a) ', 'b) ', 'c) ', 'd) '];
+        const options = [q.optionA, q.optionB, q.optionC, q.optionD];
+        
+        options.forEach((opt, idx) => {
+          docChildren.push(
+            new Paragraph({
+              children: [
+                new TextRun({ text: optionPrefix[idx], bold: true }),
+                new TextRun({ text: opt.replace(/<br>/g, ' ') }),
+              ],
+              indent: { left: 400 },
+            })
+          );
+        });
+      }
+
+      // Answer & Explanation
+      docChildren.push(
+        new Paragraph({
+          children: [
+            new TextRun({ text: "Đáp án: ", bold: true }),
+            new TextRun({ text: q.answer }),
+          ],
+          indent: { left: 400 },
+          spacing: { before: 100 },
+        })
+      );
+
+      docChildren.push(
+        new Paragraph({
+          children: [
+            new TextRun({ text: "Lời giải chi tiết: ", bold: true, italics: true }),
+            new TextRun({ text: q.explanation.replace(/<br>/g, '\n') }),
+          ],
+          indent: { left: 400 },
+          spacing: { after: 200 },
+        })
+      );
+    });
+
+    const doc = new Document({
+      sections: [{
+        properties: {},
+        children: docChildren,
+      }],
+    });
+
+    const blob = await Packer.toBlob(doc);
+    saveAs(blob, "De_Thi_Word_Chuan.docx");
+  };
+
+  const handleDownloadImages = async () => {
+    const data = parseTableData();
+    const zip = new JSZip();
+    let imageCount = 0;
+
+    data.forEach((row: any) => {
+      // Tìm mã SVG trong cột image.
+      const svgMatch = row.image.match(/<svg[\s\S]*?<\/svg>/i);
+      if (svgMatch) {
+        imageCount++;
+        const svgContent = svgMatch[0].replace(/<br\s*\/?>/gi, '\n');
+        const filename = `cau${row.id || imageCount}_de.svg`;
+        zip.file(filename, svgContent);
+      }
+
+      // Tìm mã SVG trong cột explanationImage.
+      if (row.explanationImage) {
+        const svgMatchExpl = row.explanationImage.match(/<svg[\s\S]*?<\/svg>/i);
+        if (svgMatchExpl) {
+          imageCount++;
+          const svgContentExpl = svgMatchExpl[0].replace(/<br\s*\/?>/gi, '\n');
+          const filenameExpl = `cau${row.id || imageCount}_loigiai.svg`;
+          zip.file(filenameExpl, svgContentExpl);
+        }
+      }
+    });
+
+    if (imageCount === 0) {
+      alert("Không tìm thấy hình ảnh minh họa nào để tải!");
+      return;
+    }
+
+    const content = await zip.generateAsync({ type: "blob" });
+    saveAs(content, "Hinh_Anh_Minh_Hoa.zip");
   };
 
   return (
@@ -322,9 +469,6 @@ export default function App() {
             </div>
           </div>
           <div className="hidden sm:flex items-center gap-4">
-            <a href="https://docs.google.com/spreadsheets" target="_blank" rel="noopener noreferrer" className="text-sm font-medium text-slate-600 hover:text-indigo-600 transition-colors flex items-center gap-1">
-              Google Sheets <ChevronRight className="w-4 h-4" />
-            </a>
           </div>
         </div>
       </header>
@@ -349,7 +493,7 @@ export default function App() {
                   )}
                 >
                   <Send className="w-4 h-4" />
-                  Yêu cầu
+                  Tạo đề bằng A.I
                 </button>
                 <button
                   onClick={() => setMode('file')}
@@ -365,14 +509,64 @@ export default function App() {
 
               <div className="space-y-4">
                 {mode === 'prompt' ? (
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium text-slate-700">Mô tả yêu cầu ra đề</label>
-                    <textarea
-                      value={prompt}
-                      onChange={(e) => setPrompt(e.target.value)}
-                      placeholder="Ví dụ: Tạo 5 câu trắc nghiệm Toán lớp 12 về Đạo hàm, bao gồm 2 câu MCQ, 2 câu TRUE_FALSE và 1 câu SHORT..."
-                      className="w-full h-40 p-4 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all resize-none text-sm"
-                    />
+                  <div className="space-y-6">
+                    {/* Q counts GRID */}
+                    <div className="bg-slate-50 p-4 rounded-xl border border-slate-100 space-y-4">
+                      <div className="flex items-center justify-between">
+                        <label className="text-sm font-semibold text-slate-700">Số câu trắc nghiệm (4 phương án)</label>
+                        <input
+                          type="number"
+                          min="0"
+                          value={mcqCount}
+                          onChange={(e) => setMcqCount(e.target.value)}
+                          className="w-20 p-2 bg-white border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 text-center text-sm font-bold"
+                        />
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <label className="text-sm font-semibold text-slate-700">Số câu đúng/sai</label>
+                        <input
+                          type="number"
+                          min="0"
+                          value={tfCount}
+                          onChange={(e) => setTfCount(e.target.value)}
+                          className="w-20 p-2 bg-white border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 text-center text-sm font-bold"
+                        />
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <label className="text-sm font-semibold text-slate-700">Số câu trả lời ngắn (điền đáp số)</label>
+                        <input
+                          type="number"
+                          min="0"
+                          value={shortCount}
+                          onChange={(e) => setShortCount(e.target.value)}
+                          className="w-20 p-2 bg-white border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 text-center text-sm font-bold"
+                        />
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <label className="text-sm font-semibold text-slate-700">Số câu tự luận</label>
+                        <input
+                          type="number"
+                          min="0"
+                          value={essayCount}
+                          onChange={(e) => setEssayCount(e.target.value)}
+                          className="w-20 p-2 bg-white border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 text-center text-sm font-bold"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="space-y-3">
+                      <label className="text-sm font-bold text-slate-700 flex items-center gap-2">
+                        <FileText className="w-4 h-4 text-indigo-600" />
+                        Mô tả yêu cầu cụ thể
+                      </label>
+                      <textarea
+                        value={prompt}
+                        onChange={(e) => setPrompt(e.target.value)}
+                        placeholder="Nhập chủ đề, nội dung câu hỏi, mức độ, cấu trúc chi tiết... (Bạn có thể yêu cầu A.I vẽ thêm hình minh họa cho các câu hỏi nếu cần)"
+                        className="w-full h-48 p-4 bg-slate-50 border border-slate-200 rounded-2xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all resize-none text-sm leading-relaxed"
+                      />
+                      <p className="text-[11px] text-slate-400 italic italic">Gợi ý: Cung cấp càng nhiều chi tiết về nội dung ôn tập, A.I sẽ tạo đề sát chương trình hơn.</p>
+                    </div>
                   </div>
                 ) : (
                   <div className="space-y-4">
@@ -434,7 +628,7 @@ export default function App() {
                   </div>
                 )}
 
-                {error && (
+                  {error && (
                   <motion.div 
                     initial={{ opacity: 0, y: -10 }}
                     animate={{ opacity: 1, y: 0 }}
@@ -487,7 +681,11 @@ export default function App() {
                 </li>
                 <li className="flex gap-2">
                   <span className="w-5 h-5 bg-indigo-800 rounded-full flex items-center justify-center text-[10px] shrink-0">3</span>
-                  <span>Copy bảng Markdown hoặc Xuất file Excel để dán vào Google Sheets.</span>
+                  <span>Copy bảng Markdown hoặc Xuất file Word để lưu trữ đề thi.</span>
+                </li>
+                <li className="flex gap-2">
+                  <span className="w-5 h-5 bg-indigo-800 rounded-full flex items-center justify-center text-[10px] shrink-0">4</span>
+                  <span><strong>Mới:</strong> Yêu cầu A.I "vẽ hình minh họa" để tạo hình ảnh, sau đó dùng nút <strong>"Tải hình"</strong> để tải file .zip về máy.</span>
                 </li>
               </ul>
             </section>
@@ -495,7 +693,7 @@ export default function App() {
 
           {/* Right Panel: Result */}
           <div className="lg:col-span-7">
-            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden h-full flex flex-col min-h-[600px]">
+            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col min-h-[400px]">
               <div className="p-4 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
                 <h2 className="font-semibold flex items-center gap-2">
                   <TableIcon className="w-5 h-5 text-indigo-600" />
@@ -515,20 +713,42 @@ export default function App() {
                     {copySuccess ? "Đã copy" : "Copy cho Sheets"}
                   </button>
                   <button
-                    onClick={handleExportExcel}
+                    onClick={handleExportWord}
                     disabled={!result}
                     className={cn(
                       "p-2 rounded-lg transition-all flex items-center gap-1 text-sm font-medium",
-                      result ? "bg-indigo-50 text-indigo-600 hover:bg-indigo-100" : "text-slate-300 cursor-not-allowed"
+                      result ? "bg-blue-50 text-blue-600 hover:bg-blue-100" : "text-slate-300 cursor-not-allowed"
                     )}
                   >
-                    <Download className="w-4 h-4" />
-                    Xuất Excel
+                    <FileDoc className="w-4 h-4" />
+                    Word
+                  </button>
+                  <button
+                    onClick={handleExportWordLatex}
+                    disabled={!result}
+                    className={cn(
+                      "p-2 rounded-lg transition-all flex items-center gap-1 text-sm font-medium",
+                      result ? "bg-cyan-50 text-cyan-600 hover:bg-cyan-100" : "text-slate-300 cursor-not-allowed"
+                    )}
+                  >
+                    <FileDoc className="w-4 h-4" />
+                    WordLatex
+                  </button>
+                  <button
+                    onClick={handleDownloadImages}
+                    disabled={!result}
+                    className={cn(
+                      "p-2 rounded-lg transition-all flex items-center gap-1 text-sm font-medium",
+                      result ? "bg-amber-50 text-amber-600 hover:bg-amber-100" : "text-slate-300 cursor-not-allowed"
+                    )}
+                  >
+                    <ImageIcon className="w-4 h-4" />
+                    Tải hình
                   </button>
                 </div>
               </div>
 
-              <div className="flex-1 p-6 overflow-auto custom-scrollbar">
+              <div className="flex-1 p-6 overflow-auto custom-scrollbar relative">
                 <AnimatePresence mode="wait">
                   {isGenerating ? (
                     <motion.div 
@@ -556,11 +776,11 @@ export default function App() {
                       animate={{ opacity: 1, y: 0 }}
                       className="space-y-4"
                     >
-                      <div className="p-3 bg-amber-50 border border-amber-100 rounded-xl flex items-start gap-2 text-amber-800 text-xs">
+                      <div className="p-3 bg-indigo-50 border border-indigo-100 rounded-xl flex items-start gap-2 text-indigo-800 text-xs">
                         <Info className="w-4 h-4 shrink-0 mt-0.5" />
                         <p>
-                          <strong>Lưu ý:</strong> Để tránh lỗi nhảy ô, đáp án Đúng/Sai được hiển thị tạm thời bằng dấu ";" trong bảng dưới đây. 
-                          Khi bạn nhấn <strong>"Copy cho Sheets"</strong> hoặc <strong>"Xuất Excel"</strong>, hệ thống sẽ tự động chuyển về dấu "|" theo đúng yêu cầu.
+                          <strong>Lưu ý:</strong> Để đảm bảo tính chính xác cho các công thức, đáp án Đúng/Sai được hiển thị tạm thời bằng dấu ";" trong bảng dưới đây. 
+                          Khi bạn nhấn <strong>"Copy cho Sheets"</strong> hoặc xuất file, hệ thống sẽ tự động định dạng lại theo đúng quy chuẩn.
                         </p>
                       </div>
                       <div className="markdown-body prose prose-slate max-w-none">
@@ -588,12 +808,33 @@ export default function App() {
                 </AnimatePresence>
               </div>
             </div>
+
+            {/* Adjustment Notes Section */}
+            {mode === 'file' && result && (
+              <motion.div 
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="mt-6 bg-white rounded-2xl p-6 shadow-sm border border-slate-200"
+              >
+                <h3 className="text-lg font-semibold mb-3 flex items-center gap-2">
+                  <FileText className="w-5 h-5 text-indigo-600" />
+                  👉 Ghi chú điều chỉnh so với đề gốc
+                </h3>
+                <div className="bg-slate-50 rounded-xl p-4 border border-slate-100 text-sm text-slate-700 leading-relaxed min-h-[100px]">
+                  {adjustmentNotes ? (
+                    <ReactMarkdown>{adjustmentNotes}</ReactMarkdown>
+                  ) : (
+                    <p className="italic text-slate-400">Không có chỉnh sửa nào được thực hiện.</p>
+                  )}
+                </div>
+              </motion.div>
+            )}
           </div>
         </div>
       </main>
 
       {/* Footer */}
-      <footer className="max-w-6xl mx-auto px-4 py-8 border-t border-slate-200 mt-12">
+      <footer className="max-w-6xl mx-auto px-4 py-8 border-t border-slate-200 mt-12 text-center">
         <div className="flex flex-col md:flex-row items-center justify-between gap-4 text-slate-500 text-sm">
           <p>© 2026 QuizSheet Generator. Powered by Google Gemini.</p>
           <div className="flex items-center gap-6">
@@ -641,6 +882,16 @@ export default function App() {
         }
         .markdown-body tr:hover {
           background-color: #f1f5f9;
+        }
+        
+        .markdown-body svg {
+          max-width: 100%;
+          height: auto;
+          background: white;
+          border-radius: 4px;
+          padding: 4px;
+          display: block;
+          margin: 0 auto;
         }
       `}} />
     </div>
